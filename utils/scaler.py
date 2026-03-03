@@ -1,6 +1,9 @@
 import numpy as np
 
 class Scaler:
+    """
+    简单的归一化工具
+    """
     def __init__(self , data):
 
         self.data = data
