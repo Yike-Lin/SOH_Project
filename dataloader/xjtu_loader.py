@@ -24,3 +24,15 @@ class XJTUDataset:
         self.batch = args. batch                        # 实验批次
         self.batch_size = args.batch_size               # 训练批次
 
+
+    """
+    归一化
+    """
+    def _normalize(self , data:np.ndarray) -> np.ndarray:
+        scaler = Scaler(data)
+        if self.normalized_type == 'standard':
+            data_norm = scaler.standard
+        else:
+            data_norm = scaler.minmax(feature_range=self.minmax_range)
+        return data_norm
+

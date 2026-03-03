@@ -24,7 +24,7 @@ class Scaler:
         else:
             raise ValueError('data dim error ! (只支持 (N , C , L)或者 (N , C) 两种形状)')
 
-    def standerd(self):
+    def standard(self):
         """
         标准化： (x - mean) / (var + eps)
         """
