@@ -47,7 +47,17 @@ class SOHLSTM(nn.Module):
         pred = self.regressor(last_hidden)
 
         return pred
+    
 
 
+if __name__ == '__main__':
+    # 测试前向传播
+    x = torch.rand(30 , 4 , 128)
+    net = SOHLSTM()
+    y = net(x)
+    print('input shape:' , x.shape)
+    print('output shape:' , y.shape)
 
-        
+    # 统计参数量
+    num_params = sum(p.numel() for p in net.parameters())
+    print('num params:' , num_params)
