@@ -28,6 +28,26 @@ class SOHLSTM(nn.Module):
             nn.Linear(64 , 1)               # 合并输出
         )
 
+    """
+    前向传播
+    """
+    def forward(self , x):
+
+        # 1. 形状校正 (N, C, L) -> (N, L, C)
+        if x.dim() == 3 and x.shape[1] == self.input_channels:
+            x = x.transpose(1 , 2)
+
+        # 2. 特征提取
+        out_seq , (h_n , c_n) = self.lstm(x)
+
+        # 3. 切片 只取最后一个状态
+        last_hidden = out_seq[: ,-1 ,:]
+
+        # 4. 输出结果
+        pred = self.regressor(last_hidden)
+
+        return pred
+
 
 
         
