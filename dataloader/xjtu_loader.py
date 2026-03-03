@@ -68,6 +68,49 @@ class XJTUDataset:
         soh = label / self.max_capacity
 
         return data,soh
+    
+
+    """
+    numpy -> torch + 封装 DataLoader
+    """
+    def _encapsulation(self ,train_x , train_y , test_x , test_y):
+
+        # 1. Numpy -> Pytorch Tensor
+        train_x = torch.from_numpy(train_x)                     # 形状仍然是 (N, 4, L) 或 (N, C)
+        train_y = torch.from_numpy(train_y).view(-1 , 1)        # (N,) -> (N,1)
+        test_x = torch.from_numpy(test_x)
+        test_y = torch.from_numpy(test_y).view(-1 , 1)
+
+        # 2. 训练集随机划分20%验证集
+        tr_x , val_x , tr_y , val_y = train_test_split(
+            train_x , train_y,
+            test_size=0.2,
+            random_state=self.seed
+        )
+
+        # 3. 构建DataLoader
+        train_loader = DataLoader(
+            TensorDataset(tr_x , tr_y),
+            batch_size = self.batch_size,
+            shuffle = True,
+            drop_last = False
+        )
+        valid_loader = DataLoader(
+            TensorDataset(val_x , val_y),
+            batch_size = self.batch_size,
+            shuffle = True,
+            drop_last = False
+        )
+        test_loader = DataLoader(
+            TensorDataset(test_x , test_y),
+            batch_size = self.batch_size,
+            shuffle = True,
+            drop_last = False
+        )
+
+        return train_loader , valid_loader , test_loader
+
+
 
 
         
