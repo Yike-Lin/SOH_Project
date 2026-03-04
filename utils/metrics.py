@@ -22,20 +22,23 @@ class AverageMeter:
         self.val = val
         self.sum += val * n
         self.count += n
-        self.avg = self.num / self.count
+        self.avg = self.sum / self.count
     
-    def eval_metrics(true_label , pred_label):
-        """
-        计算评估指标
-        - MAE  : 平均绝对误差
-        - MAPE : 平均绝对百分比误差
-        - MSE  : 均方误差
-        - R2 : 决定系数
-        """
-        MAE = metrics.mean_absolute_error(true_label , pred_label)
-        MAPE = metrics.mean_absolute_percentage_error(true_label , pred_label)
-        MSE = metrics.mean_squared_error(true_label , pred_label)
-        R2 = metrics.r2_score(true_label, pred_label)
-        return MAE , MAPE , MSE , R2
+def eval_metrics(true_label , pred_label):
+    """
+    计算评估指标
+    - MAE  : 平均绝对误差
+    - MAPE : 平均绝对百分比误差
+    - MSE  : 均方误差
+    - R2 : 决定系数
+    """
+    true_label = np.asarray(true_label).reshape(-1)
+    pred_label = np.asarray(pred_label).reshape(-1)
+
+    MAE = metrics.mean_absolute_error(true_label , pred_label)
+    MAPE = metrics.mean_absolute_percentage_error(true_label , pred_label)
+    MSE = metrics.mean_squared_error(true_label , pred_label)
+    R2 = metrics.r2_score(true_label, pred_label)
+    return MAE , MAPE , MSE , R2
 
 
