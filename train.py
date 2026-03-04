@@ -87,3 +87,32 @@ def train_one_epoch(model , train_loader , optimizer , criterion , device):
         meter.update(loss.item() , n = data.size(0))
     
     return meter.avg
+
+
+"""
+评估函数
+"""
+def evaluate(model , loader , criterion , device):
+    model.eval()
+    meter = AverageMeter()
+
+    true_list = []
+    pred_list = []
+
+    with torch.no_grad():
+        for data , label in loader:
+            data = data.to(device).float()
+            label = data.to(device).float()
+
+            pred = model(data)
+            loss = criterion(pred , label)
+
+            meter.update(loss.item() , n = data.size(0))
+
+            true_list.append(label.cpu().numpy())
+            pred_list.append(pred.cpu().numpy())
+
+    true_arr = np.concatenate(true_list , axis=0)
+    pred_arr = np.concatenate(pred_list , axis=0)
+
+    return meter.avg , true_arr , pred_arr
