@@ -109,6 +109,47 @@ class XJTUDataset:
         )
 
         return train_loader , valid_loader , test_loader
+    
+
+    """
+    从mat文件读出所有电池,留一电池test
+    """
+    def _get_raw_data(self , path , test_battery_id):
+        # 1. 读取文件与校验
+        mat = loadmat(path)
+        battery = mat['battery']
+
+        num_batt = battery.shape[1]
+        battery_ids = list(range(1 , num_batt + 1))
+
+        if test_battery_id not in battery_ids:
+            raise IndentationError(f'test_battery_id must be in {battery_ids} , got {test_battery_id}')
+
+        # 2. 提取测试集数据
+        test_battery = battery[0 , test_battery_id -1][0]
+        test_x , test_y = self._parser_mat_data(test_battery)
+
+        # 3. 提取并合并训练集数据
+        train_x_list , train_y_list = [],[]
+        for bid in battery_ids:
+            if bid == test_battery_id:
+                continue
+            train_battery = battery[0 , bid -1][0]
+            x , y = self._parser_mat_data(train_battery)
+            train_x_list.append(x)
+            train_y_list.append(y)
+
+        train_x = np.concatenate(train_x_list , axis=0)
+        train_y = np.concatenate(train_y_list , axis=0)
+
+        # 4. 封装 返回
+        return self._encapsulation(train_x , train_y , test_x , test_y)
+
+
+
+
+
+        
 
 
 
