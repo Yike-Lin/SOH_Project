@@ -57,5 +57,33 @@ def load_data(args):
         laoders = dataset.get_partial_data(test_battery_id = args.test_battery_id)
     else:
         laoders = dataset.get_features(test_battery_id = args.test_battery_id)
-        
+
     return loaders
+
+
+"""
+训练模型一个epoch
+"""
+def train_one_epoch(model , train_loader , optimizer , criterion , device):
+    # 设置
+    model.train()
+    meter = AverageMeter()
+
+    # 批量拿数据
+    for data , label in train_loader:
+        data = data.to(device).float()          # (B, 4, L)
+        label = label.to(device).float()        # (B, 1)
+
+        # 前向传播
+        pred = model(data)
+        loss = criterion(pred , label)
+
+        # 反向传播
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        # 记录与返回
+        meter.update(loss.item() , n = data.size(0))
+    
+    return meter.avg
