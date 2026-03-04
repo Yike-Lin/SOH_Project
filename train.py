@@ -44,4 +44,18 @@ def get_args():
     args = parser.parse_args()
     return args
 
-    
+
+"""
+根据 args 加载数据
+"""
+def load_data(args):
+    dataset = XJTUDataset(args)
+
+    if args.input_type == 'charge':
+        loaders = dataset.get_charge_data(test_battery_id = args.test_battery_id)
+    elif args.input_type == 'partial_charge':
+        laoders = dataset.get_partial_data(test_battery_id = args.test_battery_id)
+    else:
+        laoders = dataset.get_features(test_battery_id = args.test_battery_id)
+        
+    return loaders
