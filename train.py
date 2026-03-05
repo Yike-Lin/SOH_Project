@@ -20,8 +20,8 @@ def get_args():
     # 数据设置
     parser.add_argument('--random_seed', type=int, default=2023)
     parser.add_argument('--data', type=str, default='XJTU', choices=['XJTU'])
-    parser.add_argument('--input_type', type=str, default='charge',
-                        choices=['charge', 'partial_charge', 'handcraft_features'])
+    parser.add_argument('--input_type', type=str, default='full',
+                        choices=['charge', 'partial_charge', 'handcraft_features', 'full'])
     parser.add_argument('--test_battery_id', type=int, default=1)
     parser.add_argument('--batch_size', type=int, default=128)
 
@@ -55,6 +55,8 @@ def load_data(args):
         loaders = dataset.get_charge_data(test_battery_id = args.test_battery_id)
     elif args.input_type == 'partial_charge':
         loaders = dataset.get_partial_data(test_battery_id = args.test_battery_id)
+    elif args.input_type == 'full':
+        loaders = dataset.get_full_data(test_battery_id = args.test_battery_id)
     else:
         loaders = dataset.get_features(test_battery_id = args.test_battery_id)
 
@@ -147,8 +149,17 @@ def main():
         valid_loader = data_loader['valid']
         test_loader = data_loader['test']
 
-        # 6. 构建LSTM模型
-        model = SOHLSTM(input_channels = 4 , seq_len = 128,
+        # 6. 构建LSTM模型(自动推断输入维度)
+        x0, _ = next(iter(train_loader))  # x0: (B, C, L) 或 (B, C)
+        if x0.dim() != 3:
+            raise ValueError(f'当前 LSTM 期望输入 (B,C,L)，但得到 {x0.shape}，'
+                             f'handcraft_features 不适用于此 LSTM。')
+
+        C = x0.size(1)
+        L = x0.size(2)
+        print(f'Inferred input shape: C={C}, L={L}')
+
+        model = SOHLSTM(input_channels = C , seq_len = L,
                         hidden_size = 128 , num_layers = 2).to(device)
 
         # 7. 定义损失函数，优化器，学习率调度器
