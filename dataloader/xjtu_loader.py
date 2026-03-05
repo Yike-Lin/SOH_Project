@@ -69,6 +69,64 @@ class XJTUDataset:
 
         return data,soh
     
+    """
+    解析一块电池的完整充放电数据
+    """
+    def _parser_full_cycle(self , battery_i_mat):
+        data_list = []
+        cap_list = []
+
+        num_cycles = battery_i_mat.shape[1]
+
+        for i in range(num_cycles):
+            # 每一个cycle是一个struct
+            cyc = battery_i_mat[0 , i]
+
+            # 读 capacity 作为label
+            if 'capacity' in cyc.dtype.names:
+                capacity = cyc['capacity'][0]
+            elif 'cycle' in cyc.dtype.names and 'capacity' in cyc['cycle'].dtype.names:
+                capacity = cyc['cycle']['capacity'][0, 0]
+            else:
+                raise KeyError("找不到容量字段,请检查 .mat 结构里的capacity字段的名字")
+            
+            cap_list.append(capacity)
+
+
+            # ----------- 充电数据 -----------
+            ch = cyc['charge_data'][0, 0]  # 1x1 struct -> 取出
+            ch_time = ch['relative_time_min']   # (1,128)
+            ch_volt = ch['voltage_V']
+            ch_curr = ch['current_A']
+            ch_temp = ch['temperature_C']
+
+            # ----------- 放电数据 -----------
+            dis = cyc['discharge_data'][0, 0]
+            dis_time = dis['relative_time_min']
+            dis_volt = dis['voltage_V']
+            dis_curr = dis['current_A']
+            dis_temp = dis['temperature_C']
+
+            # 拼接： 充电 + 放电各 4 条，总共 8 通道，长度仍是 128
+            cycle_arr = np.concatenate(
+                [ch_time, ch_curr, ch_volt, ch_temp,
+                 dis_time, dis_curr, dis_volt, dis_temp],
+                axis=0
+            )
+
+            data_list.append(cycle_arr)
+
+        data = np.asarray(data_list , dtype = np.float32)
+        label = np.asarray(cap_list , dtype = np.float32)
+
+        # 归一化
+        data  = self._normalize(data)
+
+        # 容量 -> SOH
+        soh = label / self.max_capacity
+
+        return data , soh
+    
 
     """
     numpy -> torch + 封装 DataLoader
@@ -144,6 +202,40 @@ class XJTUDataset:
 
         # 4. 封装 返回
         return self._encapsulation(train_x , train_y , test_x , test_y)
+    
+
+    """
+    读取完整充放电的.mat文件
+    """
+    def _get_full_raw_data(self , path , test_battery_id):
+        mat = loadmat(path)
+        battery = mat['battery']
+
+        num_batt = battery.shape[1]
+        battery_ids = list(range(1 , num_batt + 1))
+
+        if test_battery_id not in battery_ids:
+            raise IndexError(f'test_battery_id must be in {battery_ids}, got {test_battery_id}')
+        
+        # 测试电池
+        test_battery = battery[0 , test_battery_id - 1][0]
+        test_x , test_y = self._parser_full_cycle(test_battery)
+
+        # 训练电池：其他电池的数据合并
+        train_x_list , train_y_list = [] , []
+        for bid in battery_ids:
+            if bid == test_battery_id:
+                continue
+            batt_i = battery[0 , bid - 1][0]
+            x_i , y_i = self._parser_full_cycle(batt_i)
+            train_x_list.append(x_i)
+            train_y_list.append(y_i)
+        
+        train_x = np.concatenate(train_x_list , axis = 0)
+        train_y = np.concatenate(train_y_list , axis = 0)
+
+        return self._encapsulation(train_x , train_y , test_x , test_y)
+    
 
     
     """
@@ -209,6 +301,17 @@ class XJTUDataset:
         train_y = np.concatenate(train_y_list, axis=0)
 
         return self._encapsulation(train_x, train_y, test_x, test_y)
+    
+
+    """
+    加载完整充放电数据
+    """
+    def get_full_data(self , test_battery_id =1):
+        file_name = f'batch-{self.batch}_full.mat'
+        path = os.path.join(self.root , 'full' , file_name)
+
+        train_loader , valid_loader , test_loader = self._get_full_raw_data(path , test_battery_id)
+        return {'train': train_loader, 'valid': valid_loader, 'test': test_loader}
     
 
 
