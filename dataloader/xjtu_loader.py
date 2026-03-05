@@ -24,6 +24,12 @@ class XJTUDataset:
         self.batch = args. batch                        # 实验批次
         self.batch_size = args.batch_size               # 训练批次
 
+    """
+     把任意形状的一条曲线变成 (1, L)，方便后面拼成 (C, L)
+    """
+    def _row(self , x):
+        x = np.asarray(x).squeeze()
+        return x.reshape(1 , -1)
 
     """
     归一化
@@ -85,27 +91,31 @@ class XJTUDataset:
             # 读 capacity 作为label
             if 'capacity' in cyc.dtype.names:
                 capacity = cyc['capacity'][0]
-            elif 'cycle' in cyc.dtype.names and 'capacity' in cyc['cycle'].dtype.names:
-                capacity = cyc['cycle']['capacity'][0, 0]
+            elif 'cycle' in cyc.dtype.names:
+                cyc2 = cyc['cycle'][0, 0]
+                if isinstance(cyc2, np.void) and 'capacity' in cyc2.dtype.names:
+                    capacity = cyc2['capacity'].item()
+                else:
+                    raise KeyError("cycle 子结构里也找不到 capacity")
             else:
                 raise KeyError("找不到容量字段,请检查 .mat 结构里的capacity字段的名字")
             
-            cap_list.append(capacity)
+            cap_list.append(float(np.asarray(capacity).squeeze()))
 
 
             # ----------- 充电数据 -----------
             ch = cyc['charge_data'][0, 0]  # 1x1 struct -> 取出
-            ch_time = ch['relative_time_min']   # (1,128)
-            ch_volt = ch['voltage_V']
-            ch_curr = ch['current_A']
-            ch_temp = ch['temperature_C']
+            ch_time = self._row(ch['relative_time_min'])
+            ch_curr = self._row(ch['current_A'])
+            ch_volt = self._row(ch['voltage_V'])
+            ch_temp = self._row(ch['temperature_C'])
 
             # ----------- 放电数据 -----------
             dis = cyc['discharge_data'][0, 0]
-            dis_time = dis['relative_time_min']
-            dis_volt = dis['voltage_V']
-            dis_curr = dis['current_A']
-            dis_temp = dis['temperature_C']
+            dis_time = self._row(dis['relative_time_min'])
+            dis_curr = self._row(dis['current_A'])
+            dis_volt = self._row(dis['voltage_V'])
+            dis_temp = self._row(dis['temperature_C'])
 
             # 拼接： 充电 + 放电各 4 条，总共 8 通道，长度仍是 128
             cycle_arr = np.concatenate(
@@ -156,13 +166,13 @@ class XJTUDataset:
         valid_loader = DataLoader(
             TensorDataset(val_x , val_y),
             batch_size = self.batch_size,
-            shuffle = True,
+            shuffle = False,
             drop_last = False
         )
         test_loader = DataLoader(
             TensorDataset(test_x , test_y),
             batch_size = self.batch_size,
-            shuffle = True,
+            shuffle = False,
             drop_last = False
         )
 
@@ -307,7 +317,7 @@ class XJTUDataset:
     加载完整充放电数据
     """
     def get_full_data(self , test_battery_id =1):
-        file_name = f'batch-{self.batch}_full.mat'
+        file_name = f'Batch{self.batch}_full.mat'
         path = os.path.join(self.root , 'full' , file_name)
 
         train_loader , valid_loader , test_loader = self._get_full_raw_data(path , test_battery_id)
@@ -327,7 +337,7 @@ if __name__ == '__main__':
     args = parser.parse_args([])  # [] 表示不用命令行参数，使用默认值
 
     dataset = XJTUDataset(args)
-    loaders = dataset.get_charge_data(test_battery_id=1)
+    loaders = dataset.get_full_data(test_battery_id=1)
 
     for split in ['train', 'valid', 'test']:
         dl = loaders[split]
