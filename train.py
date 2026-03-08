@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 
 from dataloader.xjtu_loader import XJTUDataset
-from models.lstm import SOHLSTM
+from models.Multi_Bi_LSTM_Attention import DualStreamMultiBiLSTMAttention
 from utils.metrics import AverageMeter, eval_metrics
 
 
@@ -73,11 +73,15 @@ def train_one_epoch(model , train_loader , optimizer , criterion , device):
 
     # 批量拿数据
     for data , label in train_loader:
-        data = data.to(device).float()          # (B, 4, L)
+        data = data.to(device).float()          # (B, 8, L)
         label = label.to(device).float()        # (B, 1)
 
+        # 数据切片：前四个通道是充电数据，后四个通道是放电数据
+        x_charge = data[: , 0:4 , :]            # (B, 4, L)
+        x_discharge = data[: , 4:8 , :]         # (B, 4, L)
+
         # 前向传播
-        pred = model(data)
+        pred = model(x_charge , x_discharge)
         loss = criterion(pred , label)
 
         # 反向传播
@@ -106,7 +110,10 @@ def evaluate(model , loader , criterion , device):
             data = data.to(device).float()
             label = label.to(device).float()
 
-            pred = model(data)
+            x_charge = data[:, 0:4, :]
+            x_discharge = data[:, 4:8, :]
+
+            pred = model(x_charge , x_discharge)
             loss = criterion(pred , label)
 
             meter.update(loss.item() , n = data.size(0))
@@ -127,6 +134,9 @@ main()函数
 def main():
     # 1. 读参数
     args = get_args()
+
+    if args.input_type != 'full':
+        raise ValueError("使用双流模型时,input_type必须设置为full!")
 
     # 2. 创建保存结果的目录
     os.makedirs(args.save_folder , exist_ok=True)
@@ -150,16 +160,14 @@ def main():
         test_loader = data_loader['test']
 
         # 6. 构建LSTM模型(自动推断输入维度)
-        x0, _ = next(iter(train_loader))  # x0: (B, C, L) 或 (B, C)
-        if x0.dim() != 3:
-            raise ValueError(f'当前 LSTM 期望输入 (B,C,L)，但得到 {x0.shape}，'
-                             f'handcraft_features 不适用于此 LSTM。')
+        x0, _ = next(iter(train_loader))  # x0: (B, C, L)
+        if x0.dim() != 3 or x0.size(1) != 8:
+            raise ValueError(f'双流模型期望输入 8 通道数据 (4充电+4放电)，但得到 {x0.shape}')
 
-        C = x0.size(1)
         L = x0.size(2)
-        print(f'Inferred input shape: C={C}, L={L}')
+        print(f'Inferred input shape: L={L}, Total Channels=8')
 
-        model = SOHLSTM(input_channels = C , seq_len = L,
+        model = DualStreamMultiBiLSTMAttention(input_channels = 4 , seq_len = L,
                         hidden_size = 128 , num_layers = 2).to(device)
 
         # 7. 定义损失函数，优化器，学习率调度器
