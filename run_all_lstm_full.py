@@ -6,20 +6,19 @@ import torch
 import torch.nn as nn
 
 from dataloader.xjtu_loader import XJTUDataset
-from models.lstm import SOHLSTM
 from utils.metrics import AverageMeter, eval_metrics
 
+from models.Multi_Bi_LSTM_Attention import DualStreamMultiBiLSTMAttention
 
 def get_args():
     parser = argparse.ArgumentParser(
-        description='Run LSTM SOH estimation (full charge+discharge) for all batches/tests/experiments'
+        description='Run Dual-Stream SOH estimation (full charge+discharge) for all batches/tests/experiments'
     )
 
     # 数据设置
     parser.add_argument('--random_seed', type=int, default=2023)
     parser.add_argument('--data', type=str, default='XJTU', choices=['XJTU'])
 
-    # 这里固定使用 full
     parser.add_argument('--input_type', type=str, default='full',
                         choices=['full', 'charge', 'partial_charge', 'handcraft_features'],
                         help='本脚本主要用于 full，如果想跑别的类型可以改这个')
@@ -29,24 +28,21 @@ def get_args():
                         choices=['minmax', 'standard'])
     parser.add_argument('--minmax_range', type=tuple, default=(-1, 1),
                         choices=[(0, 1), (-1, 1)])
-
-    # 要跑哪些 batch，比如 1~9
     parser.add_argument('--batch_list', type=int, nargs='+',
                         default=[1, 2, 3, 4, 5, 6, 7, 8, 9],
                         help='要跑的 batch 列表')
-
-    # 每个 batch 要跑哪些测试电池 ID（具体有多少块电池请按实际改）
     parser.add_argument('--test_ids', type=int, nargs='+',
                         default=[1, 2, 3, 4, 5, 6, 7, 8],
                         help='每个 batch 要跑的 test_battery_id 列表')
 
-    # 模型&训练设置
     parser.add_argument('--lr', type=float, default=2e-3)
     parser.add_argument('--weight_decay', type=float, default=5e-4)
     parser.add_argument('--n_epoch', type=int, default=100)
     parser.add_argument('--early_stop', type=int, default=30)
     parser.add_argument('--device', default='cuda')
-    parser.add_argument('--save_folder', default='results_LSTM')
+    
+    parser.add_argument('--save_folder', default='results_DualStream_Auto') 
+    
     parser.add_argument('--experiment_num', type=int, default=3,
                         help='同一配置重复实验次数')
 
@@ -74,10 +70,16 @@ def train_one_epoch(model, train_loader, optimizer, criterion, device):
     meter = AverageMeter()
 
     for data, label in train_loader:
-        data = data.to(device).float()     # (B, C, L)
+        data = data.to(device).float()     # (B, 8, L)
         label = label.to(device).float()   # (B, 1)
 
-        pred = model(data)
+        # 数据切片
+        x_charge = data[:, 0:4, :]
+        x_discharge = data[:, 4:8, :]
+
+        # 传入两个数据流
+        pred = model(x_charge, x_discharge)
+
         loss = criterion(pred, label)
 
         optimizer.zero_grad()
@@ -101,7 +103,12 @@ def evaluate(model, loader, criterion, device):
             data = data.to(device).float()
             label = label.to(device).float()
 
-            pred = model(data)
+            x_charge = data[:, 0:4, :]
+            x_discharge = data[:, 4:8, :]
+
+            # 传入两个数据流
+            pred = model(x_charge, x_discharge)
+
             loss = criterion(pred, label)
 
             meter.update(loss.item(), n=data.size(0))
@@ -117,10 +124,12 @@ def evaluate(model, loader, criterion, device):
 
 def main():
     args = get_args()
+    
+    if args.input_type != 'full':
+        raise ValueError("使用双流模型时，请确保 --input_type 设置为 'full'！")
 
     os.makedirs(args.save_folder, exist_ok=True)
 
-    # 固定随机种子（基础种子）
     torch.manual_seed(args.random_seed)
     np.random.seed(args.random_seed)
 
@@ -162,17 +171,19 @@ def main():
                 torch.manual_seed(seed)
                 np.random.seed(seed)
 
-                # 从一个 batch 推断输入维度
                 x0, _ = next(iter(train_loader))
-                if x0.dim() != 3:
-                    raise ValueError(f'当前 LSTM 期望输入 (B,C,L)，但得到 {x0.shape}，'
-                                     f'handcraft_features 不适用于此 LSTM。')
-                C = x0.size(1)
+                if x0.dim() != 3 or x0.size(1) != 8:
+                    raise ValueError(f'双流模型期望输入 8 通道数据 (4充+4放)，但得到 {x0.shape}')
+                
                 L = x0.size(2)
-                print(f'  Inferred input shape: C={C}, L={L}')
+                print(f'  Inferred input shape: Total Channels=8, L={L}')
 
-                model = SOHLSTM(input_channels=C, seq_len=L,
-                                hidden_size=128, num_layers=2).to(device)
+                model = DualStreamMultiBiLSTMAttention(
+                    input_channels=4, 
+                    seq_len=L,
+                    hidden_size=128, 
+                    num_layers=2
+                ).to(device)
 
                 criterion = nn.MSELoss()
                 optimizer = torch.optim.Adam(
@@ -228,10 +239,9 @@ def main():
                 print(f'  Final test: MAE={MAE:.5f} , MAPE={MAPE:.5f} , '
                       f'MSE={MSE:.5f}, R2={R2:.5f}')
 
-                # 保存路径: results_LSTM/XJTU-full/batchx/testx/expx
                 save_dir = os.path.join(
                     args.save_folder,
-                    f'{args.data}-full',           # 固定 full
+                    f'{args.data}-full',
                     f'batch{batch_id}',
                     f'test{test_id}',
                     f'exp{exp + 1}'
