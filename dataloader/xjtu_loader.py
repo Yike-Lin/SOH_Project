@@ -322,6 +322,28 @@ class XJTUDataset:
 
         train_loader , valid_loader , test_loader = self._get_full_raw_data(path , test_battery_id)
         return {'train': train_loader, 'valid': valid_loader, 'test': test_loader}
+
+    """
+    读取某个batch完整的充放电数据,返回(x_all , y_all)
+    """
+    def _load_one_batch_full(self , batch_id):
+        file_name = f'Batch{batch_id}_full.mat'
+        path = os.path.join(self.root , 'full' , file_name)
+
+        mat = loadmat(path)
+        battery = mat['battery']
+        num_batt = battery.shape[1]
+
+        x_list , y_list = [],[]
+        for bid in range(num_batt):
+            batt_i = battery[0 , bid][0]
+            x_i , y_i = self._parser_full_cycle(batt_i)
+            x_list.append(x_i)
+            y_list.append(y_i)
+        
+        x_all = np.concatenate(x_list , axis=0).astype(np.float32)
+        y_all = np.concatenate(y_list , axis=0).astype(np.float32)
+        return x_all , y_all
     
 
 
