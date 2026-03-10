@@ -7,11 +7,11 @@ import pandas as pd
 
 def parse_args():
     p = argparse.ArgumentParser("Summarize LSTM results (mean over exps for each test)")
-    p.add_argument("--root", type=str, default="results_LSTM/XJTU-full",
+    p.add_argument("--root", type=str, default="results_DualStream_Auto\XJTU-full",
                    help="结果根目录，例如 results_LSTM/XJTU-full")
     p.add_argument("--batches", type=int, nargs="*", default=None,
                    help="只统计这些 batch，例如: --batches 1 2 3 4 5；不填则统计root下所有batch*")
-    p.add_argument("--out_csv", type=str, default="results_LSTM/XJTU-full/summary_test_mean.csv",
+    p.add_argument("--out_csv", type=str, default="results_DualStream_Auto\XJTU-full/summary_test_mean.csv",
                    help="输出 csv：每个(batch,test)一行，为exp平均后的指标")
     return p.parse_args()
 
