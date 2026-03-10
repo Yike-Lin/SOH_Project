@@ -343,18 +343,3 @@ if __name__ == '__main__':
         dl = loaders[split]
         x, y = next(iter(dl))
         print(split, 'batch x shape:', x.shape, 'batch y shape:', y.shape)
-        
-
-
-
-
-        
-
-
-
-
-
-
-
-
-
