@@ -1,94 +1,70 @@
-from scipy.io import loadmat
+import os
 import numpy as np
 import pandas as pd
 import torch
+from scipy.io import loadmat
 from torch.utils.data import TensorDataset, DataLoader
 from sklearn.model_selection import train_test_split
-import os
 
 from utils.scaler import Scaler
 
 
-
 class XJTUDataset:
-    """
-    初始化,保存一些配置参数
-    """
-    def __init__(self , args):
+    """XJTU Battery Dataset Loader"""
+    
+    def __init__(self, args):
         self.root = 'data/XJTU'
         self.max_capacity = 2.0
-
         self.normalized_type = args.normalized_type
         self.minmax_range = args.minmax_range
         self.seed = args.random_seed
-        self.batch = args. batch                        # 实验批次
-        self.batch_size = args.batch_size               # 训练批次
+        self.batch = getattr(args, 'batch', None)
+        self.batch_size = args.batch_size
 
-    """
-     把任意形状的一条曲线变成 (1, L)，方便后面拼成 (C, L)
-    """
-    def _row(self , x):
-        x = np.asarray(x).squeeze()
-        return x.reshape(1 , -1)
+    def _row(self, x):
+        """Reshape array to (1, -1) for sequence concatenation"""
+        return np.asarray(x).squeeze().reshape(1, -1)
 
-    """
-    归一化
-    """
-    def _normalize(self , data:np.ndarray) -> np.ndarray:
+    def _normalize(self, data: np.ndarray) -> np.ndarray:
+        """Normalize input data based on initialized scaler settings"""
         scaler = Scaler(data)
         if self.normalized_type == 'standard':
-            data_norm = scaler.standard
-        else:
-            data_norm = scaler.minmax(feature_range=self.minmax_range)
-        return data_norm
+            return scaler.standard
+        return scaler.minmax(feature_range=self.minmax_range)
     
-    """
-    解析单块电池的.mat数据
-    """
-    def _parser_mat_data(self , battery_i_mat):
-        # 1. 初始化列表
-        data_list = []          # 装时间序列特征    
-        cap_list = []           # 装每一圈cycle测出来的实际容量
-
-        # 2. 核心循环：一圈圈拆数据
-        for i in range(battery_i_mat.shape[1]): # battery_i_mat.shape[1] 是该电池总循环次数
-            cycle_i = battery_i_mat[0 , i]      # cycle_i 是当前第 i 圈的所有数据包
-
+    def _parser_mat_data(self, battery_i_mat):
+        """Parse partial/time-series data from a single battery .mat struct"""
+        data_list, cap_list = [], []
+        
+        for i in range(battery_i_mat.shape[1]):
+            cycle_i = battery_i_mat[0, i]
             time = cycle_i['relative_time_min']
             current = cycle_i['current_A']
             voltage = cycle_i['voltage_V']
             temp = cycle_i['temperature_C']
-
             capacity = cycle_i['capacity'][0]
-            cap_list.append(capacity)
 
-            cycle_arr = np.concatenate([time , current , voltage , temp] , axis=0)
+            cap_list.append(capacity)
+            cycle_arr = np.concatenate([time, current, voltage, temp], axis=0)
             data_list.append(cycle_arr)
 
-        # 3. 所有圈数合并：(4 , L) -> (N , 4 , L)
-        data = np.asarray(data_list , dtype=np.float32)
-        label = np.asarray(cap_list , dtype=np.float32)
+        data = np.asarray(data_list, dtype=np.float32)
+        label = np.asarray(cap_list, dtype=np.float32)
 
-        # 4. 归一化，贴标签
         data = self._normalize(data)
         soh = label / self.max_capacity
 
-        return data,soh
+        return data, soh
     
-    """
-    解析一块电池的完整充放电数据
-    """
-    def _parser_full_cycle(self , battery_i_mat):
-        data_list = []
-        cap_list = []
-
+    def _parser_full_cycle(self, battery_i_mat):
+        """Parse full charge and discharge data from a single battery .mat struct"""
+        data_list, cap_list = [], []
         num_cycles = battery_i_mat.shape[1]
 
         for i in range(num_cycles):
-            # 每一个cycle是一个struct
-            cyc = battery_i_mat[0 , i]
+            cyc = battery_i_mat[0, i]
 
-            # 读 capacity 作为label
+            # Extract Capacity
             if 'capacity' in cyc.dtype.names:
                 capacity = cyc['capacity'][0]
             elif 'cycle' in cyc.dtype.names:
@@ -96,198 +72,129 @@ class XJTUDataset:
                 if isinstance(cyc2, np.void) and 'capacity' in cyc2.dtype.names:
                     capacity = cyc2['capacity'].item()
                 else:
-                    raise KeyError("cycle 子结构里也找不到 capacity")
+                    raise KeyError("Missing capacity field in nested cycle struct.")
             else:
-                raise KeyError("找不到容量字段,请检查 .mat 结构里的capacity字段的名字")
+                raise KeyError("Missing capacity field in .mat structure.")
             
             cap_list.append(float(np.asarray(capacity).squeeze()))
 
+            # Extract Charge Data
+            ch = cyc['charge_data'][0, 0]
+            ch_data = [
+                self._row(ch['relative_time_min']), self._row(ch['current_A']),
+                self._row(ch['voltage_V']), self._row(ch['temperature_C'])
+            ]
 
-            # ----------- 充电数据 -----------
-            ch = cyc['charge_data'][0, 0]  # 1x1 struct -> 取出
-            ch_time = self._row(ch['relative_time_min'])
-            ch_curr = self._row(ch['current_A'])
-            ch_volt = self._row(ch['voltage_V'])
-            ch_temp = self._row(ch['temperature_C'])
-
-            # ----------- 放电数据 -----------
+            # Extract Discharge Data
             dis = cyc['discharge_data'][0, 0]
-            dis_time = self._row(dis['relative_time_min'])
-            dis_curr = self._row(dis['current_A'])
-            dis_volt = self._row(dis['voltage_V'])
-            dis_temp = self._row(dis['temperature_C'])
+            dis_data = [
+                self._row(dis['relative_time_min']), self._row(dis['current_A']),
+                self._row(dis['voltage_V']), self._row(dis['temperature_C'])
+            ]
 
-            # 拼接： 充电 + 放电各 4 条，总共 8 通道，长度仍是 128
-            cycle_arr = np.concatenate(
-                [ch_time, ch_curr, ch_volt, ch_temp,
-                 dis_time, dis_curr, dis_volt, dis_temp],
-                axis=0
-            )
-
+            cycle_arr = np.concatenate(ch_data + dis_data, axis=0)
             data_list.append(cycle_arr)
 
-        data = np.asarray(data_list , dtype = np.float32)
-        label = np.asarray(cap_list , dtype = np.float32)
+        data = np.asarray(data_list, dtype=np.float32)
+        label = np.asarray(cap_list, dtype=np.float32)
 
-        # 归一化
-        data  = self._normalize(data)
-
-        # 容量 -> SOH
+        data = self._normalize(data)
         soh = label / self.max_capacity
 
-        return data , soh
+        return data, soh
     
-
-    """
-    numpy -> torch + 封装 DataLoader
-    """
-    def _encapsulation(self ,train_x , train_y , test_x , test_y):
-
-        # 1. Numpy -> Pytorch Tensor
-        train_x = torch.from_numpy(train_x)                     # 形状仍然是 (N, 4, L) 或 (N, C)
-        train_y = torch.from_numpy(train_y).view(-1 , 1)        # (N,) -> (N,1)
+    def _encapsulation(self, train_x, train_y, test_x, test_y):
+        """Convert numpy arrays to PyTorch DataLoaders with a train/val split"""
+        train_x = torch.from_numpy(train_x)
+        train_y = torch.from_numpy(train_y).view(-1, 1)
         test_x = torch.from_numpy(test_x)
-        test_y = torch.from_numpy(test_y).view(-1 , 1)
+        test_y = torch.from_numpy(test_y).view(-1, 1)
 
-        # 2. 训练集随机划分20%验证集
-        tr_x , val_x , tr_y , val_y = train_test_split(
-            train_x , train_y,
-            test_size=0.2,
-            random_state=self.seed
+        tr_x, val_x, tr_y, val_y = train_test_split(
+            train_x, train_y, test_size=0.2, random_state=self.seed
         )
 
-        # 3. 构建DataLoader
-        train_loader = DataLoader(
-            TensorDataset(tr_x , tr_y),
-            batch_size = self.batch_size,
-            shuffle = True,
-            drop_last = False
-        )
-        valid_loader = DataLoader(
-            TensorDataset(val_x , val_y),
-            batch_size = self.batch_size,
-            shuffle = False,
-            drop_last = False
-        )
-        test_loader = DataLoader(
-            TensorDataset(test_x , test_y),
-            batch_size = self.batch_size,
-            shuffle = False,
-            drop_last = False
-        )
+        train_loader = DataLoader(TensorDataset(tr_x, tr_y), batch_size=self.batch_size, shuffle=True)
+        valid_loader = DataLoader(TensorDataset(val_x, val_y), batch_size=self.batch_size, shuffle=False)
+        test_loader = DataLoader(TensorDataset(test_x, test_y), batch_size=self.batch_size, shuffle=False)
 
-        return train_loader , valid_loader , test_loader
+        return train_loader, valid_loader, test_loader
     
-
-    """
-    从mat文件读出所有电池,留一电池test
-    """
-    def _get_raw_data(self , path , test_battery_id):
-        # 1. 读取文件与校验
+    def _get_raw_data(self, path, test_battery_id):
+        """Read .mat file and perform leave-one-battery-out splitting"""
         mat = loadmat(path)
         battery = mat['battery']
-
         num_batt = battery.shape[1]
-        battery_ids = list(range(1 , num_batt + 1))
+        battery_ids = list(range(1, num_batt + 1))
 
         if test_battery_id not in battery_ids:
-            raise IndentationError(f'test_battery_id must be in {battery_ids} , got {test_battery_id}')
+            raise IndexError(f'test_battery_id must be in {battery_ids}, got {test_battery_id}')
 
-        # 2. 提取测试集数据
-        test_battery = battery[0 , test_battery_id -1][0]
-        test_x , test_y = self._parser_mat_data(test_battery)
+        test_battery = battery[0, test_battery_id - 1][0]
+        test_x, test_y = self._parser_mat_data(test_battery)
 
-        # 3. 提取并合并训练集数据
-        train_x_list , train_y_list = [],[]
+        train_x_list, train_y_list = [], []
         for bid in battery_ids:
             if bid == test_battery_id:
                 continue
-            train_battery = battery[0 , bid -1][0]
-            x , y = self._parser_mat_data(train_battery)
+            x, y = self._parser_mat_data(battery[0, bid - 1][0])
             train_x_list.append(x)
             train_y_list.append(y)
 
-        train_x = np.concatenate(train_x_list , axis=0)
-        train_y = np.concatenate(train_y_list , axis=0)
+        train_x = np.concatenate(train_x_list, axis=0)
+        train_y = np.concatenate(train_y_list, axis=0)
 
-        # 4. 封装 返回
-        return self._encapsulation(train_x , train_y , test_x , test_y)
+        return self._encapsulation(train_x, train_y, test_x, test_y)
     
-
-    """
-    读取完整充放电的.mat文件
-    """
-    def _get_full_raw_data(self , path , test_battery_id):
+    def _get_full_raw_data(self, path, test_battery_id):
+        """Read full-cycle .mat file and perform leave-one-battery-out splitting"""
         mat = loadmat(path)
         battery = mat['battery']
-
         num_batt = battery.shape[1]
-        battery_ids = list(range(1 , num_batt + 1))
+        battery_ids = list(range(1, num_batt + 1))
 
         if test_battery_id not in battery_ids:
             raise IndexError(f'test_battery_id must be in {battery_ids}, got {test_battery_id}')
         
-        # 测试电池
-        test_battery = battery[0 , test_battery_id - 1][0]
-        test_x , test_y = self._parser_full_cycle(test_battery)
+        test_battery = battery[0, test_battery_id - 1][0]
+        test_x, test_y = self._parser_full_cycle(test_battery)
 
-        # 训练电池：其他电池的数据合并
-        train_x_list , train_y_list = [] , []
+        train_x_list, train_y_list = [], []
         for bid in battery_ids:
             if bid == test_battery_id:
                 continue
-            batt_i = battery[0 , bid - 1][0]
-            x_i , y_i = self._parser_full_cycle(batt_i)
+            x_i, y_i = self._parser_full_cycle(battery[0, bid - 1][0])
             train_x_list.append(x_i)
             train_y_list.append(y_i)
         
-        train_x = np.concatenate(train_x_list , axis = 0)
-        train_y = np.concatenate(train_y_list , axis = 0)
+        train_x = np.concatenate(train_x_list, axis=0)
+        train_y = np.concatenate(train_y_list, axis=0)
 
-        return self._encapsulation(train_x , train_y , test_x , test_y)
+        return self._encapsulation(train_x, train_y, test_x, test_y)
+
+    def get_charge_data(self, test_battery_id=1):
+        """Public API: Load full charge curves"""
+        path = os.path.join(self.root, 'charge', f'batch-{self.batch}.mat')
+        loaders = self._get_raw_data(path, test_battery_id)
+        return dict(zip(['train', 'valid', 'test'], loaders))
     
+    def get_partial_data(self, test_battery_id=1):
+        """Public API: Load partial charge curves"""
+        suffix = '3.9-4.19' if self.batch == 6 else '3.7-4.1'
+        path = os.path.join(self.root, 'partial_charge', f'batch-{self.batch}_{suffix}.mat')
+        loaders = self._get_raw_data(path, test_battery_id)
+        return dict(zip(['train', 'valid', 'test'], loaders))
 
-    
-    """
-    加载完整充电曲线数据接口
-    """
-    def get_charge_data(self , test_battery_id = 1):
-        file_name = f'batch-{self.batch}.mat'
-        path = os.path.join(self.root , 'charge' , file_name)
-
-        train_loader , valid_laoder , test_loader = self._get_raw_data(path , test_battery_id)
-        return {'train': train_loader , 'valid': valid_laoder , 'test': test_loader}
-    
-    """
-    加载部分充电曲线数据接口
-    """
-    def get_partial_data(self , test_battery_id = 1):
-        if self.batch == 6:
-            file_name = f'batch-{self.batch}_3.9-4.19.mat'
-        else:
-            file_name = f'batch-{self.batch}_3.7-4.1.mat'
-
-        path = os.path.join(self.root, 'partial_charge', file_name)
-        train_loader, valid_loader, test_loader = self._get_raw_data(path, test_battery_id)
-        return {'train': train_loader, 'valid': valid_loader, 'test': test_loader}
-
-    """
-    解析电池在 Excel 表中的特征数据
-    """
-    def _parser_xlsx(self , df_i: pd.DataFrame):
+    def _parser_xlsx(self, df_i: pd.DataFrame):
+        """Parse features and labels from excel sheets"""
         x = np.asarray(df_i.iloc[:, :-1], dtype=np.float32)
         label = np.asarray(df_i['label'], dtype=np.float32)
         x = self._normalize(x)
-        soh = label / self.max_capacity
-        return x, soh
+        return x, label / self.max_capacity
     
-    """
-    加载手工特征数据
-    """
-    def get_features(self , test_battery_id = 1):
-        file_name = f'batch-{self.batch}_features.xlsx'
-        path = os.path.join(self.root, 'handcraft_features', file_name)
-
+    def get_features(self, test_battery_id=1):
+        """Public API: Load handcrafted features from excel"""
+        path = os.path.join(self.root, 'handcraft_features', f'batch-{self.batch}_features.xlsx')
         df_dict = pd.read_excel(path, sheet_name=None)
         sheet_names = list(df_dict.keys())
         battery_ids = list(range(1, len(sheet_names) + 1))
@@ -302,49 +209,66 @@ class XJTUDataset:
         for bid in battery_ids:
             if bid == test_battery_id:
                 continue
-            df_i = df_dict[sheet_names[bid - 1]]
-            x, y = self._parser_xlsx(df_i)
+            x, y = self._parser_xlsx(df_dict[sheet_names[bid - 1]])
             train_x_list.append(x)
             train_y_list.append(y)
 
         train_x = np.concatenate(train_x_list, axis=0)
         train_y = np.concatenate(train_y_list, axis=0)
 
-        return self._encapsulation(train_x, train_y, test_x, test_y)
+        loaders = self._encapsulation(train_x, train_y, test_x, test_y)
+        return dict(zip(['train', 'valid', 'test'], loaders))
     
+    def get_full_data(self, test_battery_id=1):
+        """Public API: Load full charge & discharge data"""
+        path = os.path.join(self.root, 'full', f'Batch{self.batch}_full.mat')
+        loaders = self._get_full_raw_data(path, test_battery_id)
+        return dict(zip(['train', 'valid', 'test'], loaders))
 
-    """
-    加载完整充放电数据
-    """
-    def get_full_data(self , test_battery_id =1):
-        file_name = f'Batch{self.batch}_full.mat'
-        path = os.path.join(self.root , 'full' , file_name)
-
-        train_loader , valid_loader , test_loader = self._get_full_raw_data(path , test_battery_id)
-        return {'train': train_loader, 'valid': valid_loader, 'test': test_loader}
-
-    """
-    读取某个batch完整的充放电数据,返回(x_all , y_all)
-    """
-    def _load_one_batch_full(self , batch_id):
-        file_name = f'Batch{batch_id}_full.mat'
-        path = os.path.join(self.root , 'full' , file_name)
-
+    def _load_one_batch_full(self, batch_id, with_batt_index=False):
+        """Helper to load all batteries within a single batch"""
+        path = os.path.join(self.root, 'full', f'Batch{batch_id}_full.mat')
         mat = loadmat(path)
         battery = mat['battery']
         num_batt = battery.shape[1]
 
-        x_list , y_list = [],[]
+        x_list, y_list, bid_list = [], [], []
         for bid in range(num_batt):
-            batt_i = battery[0 , bid][0]
-            x_i , y_i = self._parser_full_cycle(batt_i)
+            x_i, y_i = self._parser_full_cycle(battery[0, bid][0])
             x_list.append(x_i)
             y_list.append(y_i)
+
+            if with_batt_index:
+                bid_list.append(np.full(shape=(x_i.shape[0],), fill_value=bid + 1, dtype=np.int32))
         
-        x_all = np.concatenate(x_list , axis=0).astype(np.float32)
-        y_all = np.concatenate(y_list , axis=0).astype(np.float32)
-        return x_all , y_all
+        x_all = np.concatenate(x_list, axis=0).astype(np.float32)
+        y_all = np.concatenate(y_list, axis=0).astype(np.float32)
+
+        if with_batt_index:
+            return x_all, y_all, np.concatenate(bid_list, axis=0)
+        return x_all, y_all
     
+    def get_full_data_cross_batch(self, train_batches, test_batch):
+        """Public API: Cross-batch scenario dataloader mapping"""
+        train_x_list, train_y_list = [], []
+        for b in train_batches:
+            x_b, y_b = self._load_one_batch_full(b)
+            train_x_list.append(x_b)
+            train_y_list.append(y_b)
+            
+        train_x = np.concatenate(train_x_list, axis=0)
+        train_y = np.concatenate(train_y_list, axis=0)
+
+        test_x, test_y, test_batt_ids = self._load_one_batch_full(test_batch, with_batt_index=True)
+
+        train_loader, valid_loader, test_loader = self._encapsulation(train_x, train_y, test_x, test_y)
+
+        return {
+            'train': train_loader,
+            'valid': valid_loader,
+            'test': test_loader,
+            'test_batt_ids': test_batt_ids,
+        }
 
 
 if __name__ == '__main__':
@@ -356,7 +280,7 @@ if __name__ == '__main__':
     parser.add_argument('--minmax_range', type=tuple, default=(-1, 1))
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--batch', type=int, default=1)
-    args = parser.parse_args([])  # [] 表示不用命令行参数，使用默认值
+    args = parser.parse_args([])
 
     dataset = XJTUDataset(args)
     loaders = dataset.get_full_data(test_battery_id=1)
@@ -364,4 +288,4 @@ if __name__ == '__main__':
     for split in ['train', 'valid', 'test']:
         dl = loaders[split]
         x, y = next(iter(dl))
-        print(split, 'batch x shape:', x.shape, 'batch y shape:', y.shape)
+        print(f"[{split.capitalize():<5}] batch x shape: {x.shape}, batch y shape: {y.shape}")
