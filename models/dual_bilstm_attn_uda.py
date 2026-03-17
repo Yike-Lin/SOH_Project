@@ -116,4 +116,4 @@ class DualStreamBiLSTMAttentionUDA(nn.Module):
         fused = torch.cat([feat_c, feat_d], dim=1) 
         soh_pred = self.regressor(fused)
 
-        return soh_pred, domain_logits
+        return soh_pred, domain_logits, fused
