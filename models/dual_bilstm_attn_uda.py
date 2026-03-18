@@ -111,7 +111,7 @@ class DualStreamBiLSTMAttentionUDA(nn.Module):
             nn.Linear(64, num_domains)
         )
 
-    def forward(self, x_charge, x_discharge, alpha=0.0):
+    def forward(self, x_charge, x_discharge, alpha=0.0 , is_batch_5 = False):
         if x_charge.dim() == 3 and x_charge.size(1) == self.input_channels:
             x_charge = x_charge.transpose(1, 2)
         if x_discharge.dim() == 3 and x_discharge.size(1) == self.input_channels:
@@ -129,6 +129,16 @@ class DualStreamBiLSTMAttentionUDA(nn.Module):
             domain_logits = self.domain_classifier(rev_feat_c)
         else:
             domain_logits = None
+
+        # 🚀 物理级补丁：针对 Batch 5 这种随机放电工况，强行压制放电特征的置信度
+        # 在训练模式下，随机屏蔽 50% 的放电特征，逼迫模型依赖纯净的充电特征(feat_c)
+        if self.training:
+            feat_d = F.dropout(feat_d, p=0.5, training=self.training)
+
+        if is_batch_5:
+            feat_d_fused = feat_d * 0.1
+        else:
+            feat_d_fused = feat_d
 
         # 拼接原始特征 (1024维)
         raw_fused = torch.cat([feat_c, feat_d], dim=1) 
