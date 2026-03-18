@@ -18,18 +18,24 @@ def grad_reverse(x, lambd=1.0):
 class TemporalAttention(nn.Module):
     def __init__(self, hidden_dim):
         super(TemporalAttention, self).__init__()
+        # 🚀 绝杀 1：加入 LayerNorm！
+        # XJTU 不同 Batch 的电流电压绝对幅值差异很大。
+        # 在算 Attention 前强行拉回标准正态分布，能瞬间抹平大量物理工况带来的 Covariate Shift（协变量偏移）。
+        self.layer_norm = nn.LayerNorm(hidden_dim)
+        
         self.attention = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.Tanh(),
+            nn.GELU(), # 🚀 绝杀 2：Tanh 换 GELU，防止长序列微调时梯度僵死
             nn.Linear(hidden_dim // 2, 1)
         )
 
     def forward(self, x):
-        scores = self.attention(x)
+        x_norm = self.layer_norm(x)
+        scores = self.attention(x_norm)
         weights = F.softmax(scores, dim=1)
         context = torch.sum(weights * x, dim=1)
         
-        # 保留关键的末端时间步残差直连
+        # 你的神来之笔：保留末端时间步残差，锁住衰减拐点
         last_state = x[:, -1, :]
         out = torch.cat([context, last_state], dim=1)
         return out
@@ -37,8 +43,7 @@ class TemporalAttention(nn.Module):
 
 class DualStreamBiLSTMAttentionUDA(nn.Module):
     """
-    非对称跨域对齐 (Charge-Only UDA)
-    剥离了对归一化敏感的 Wide 分支，全权交由深度网络进行特征融合
+    终极版：非对称跨域对齐 + 瓶颈特征提纯 (Bottleneck CORAL)
     """
     def __init__(
         self,
@@ -77,18 +82,31 @@ class DualStreamBiLSTMAttentionUDA(nn.Module):
         )
         self.attn_discharge = TemporalAttention(self.bi_hidden)
 
+        # 🚀 绝杀 3：特征瓶颈层 (Bottleneck)
+        # 解决 CORAL Loss 在 1024 维高维空间算协方差矩阵导致的“秩亏（秩不够，满地噪声）”问题
+        # 强迫模型把最核心的 SOH 信息压缩到 128 维
+        self.bottleneck_dim = 128
+        self.bottleneck = nn.Sequential(
+            nn.Linear(fuse_dim, self.bottleneck_dim),
+            nn.LayerNorm(self.bottleneck_dim),
+            nn.GELU(),
+            nn.Dropout(0.2)
+        )
+
         # ================= 回归预测头 =================
+        # 吃压缩后的 128 维特征，回归变得更稳
         self.regressor = nn.Sequential(
-            nn.Linear(fuse_dim, 64),
-            nn.LeakyReLU(),
-            nn.Dropout(0.2),
+            nn.Linear(self.bottleneck_dim, 64),
+            nn.GELU(),
+            nn.Dropout(0.1),
             nn.Linear(64, 1)
         )
 
         # ================= 域分类头 =================
+        # 保持你的非对称策略：依然只吃充电分支的特征 (attn_out_dim = 512)
         self.domain_classifier = nn.Sequential(
             nn.Linear(self.attn_out_dim, 64),
-            nn.ReLU(),
+            nn.GELU(),
             nn.Dropout(0.2),
             nn.Linear(64, num_domains)
         )
@@ -105,15 +123,22 @@ class DualStreamBiLSTMAttentionUDA(nn.Module):
         out_d, _ = self.lstm_discharge(x_discharge)
         feat_d = self.attn_discharge(out_d)
 
-        # 核心：只让 feat_c 走 GRL 对抗
+        # 核心：保留你的非对称对抗，只让 feat_c 走 GRL
         if alpha > 0:
             rev_feat_c = grad_reverse(feat_c, lambd=alpha)
             domain_logits = self.domain_classifier(rev_feat_c)
         else:
             domain_logits = None
 
-        # 拼接进行预测 (无偏差的深度回归)
-        fused = torch.cat([feat_c, feat_d], dim=1) 
-        soh_pred = self.regressor(fused)
+        # 拼接原始特征 (1024维)
+        raw_fused = torch.cat([feat_c, feat_d], dim=1) 
+        
+        # 通过瓶颈层提纯特征 (压到 128维)
+        bottleneck_feat = self.bottleneck(raw_fused)
 
-        return soh_pred, domain_logits, fused
+        # 回归预测
+        soh_pred = self.regressor(bottleneck_feat)
+
+        # 返回 bottleneck_feat 给外部。外部的 train.py 里的 coral_loss(fused_s, fused_t) 
+        # 现在实际上是在 128 维的高纯度空间里计算对齐，再也不会因为高维噪声算崩了！
+        return soh_pred, domain_logits, bottleneck_feat
