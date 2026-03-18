@@ -37,9 +37,44 @@ def get_args():
     p.add_argument('--ft_lr', type=float, default=5e-4)
 
     p.add_argument('--device', default='cuda')
-    p.add_argument('--save_folder', default='results_SSDA_cross_batch')
+    p.add_argument('--save_folder', default='results_SSDA_cross_batch2')
 
     return p.parse_args()
+
+
+def coral_loss(source, target):
+    """Deep CORAL Loss: 对齐二阶协方差矩阵，解决回归任务下的特征畸变"""
+    d = source.size(1)
+    ns, nt = source.size(0), target.size(0)
+    
+    # 防止 batch_size 为 1 时的除零错误
+    if ns < 2 or nt < 2:
+        return torch.tensor(0.0).to(source.device)
+
+    tmp_s = torch.ones((1, ns)).to(source.device) @ source
+    cs = (source.t() @ source - (tmp_s.t() @ tmp_s) / ns) / (ns - 1)
+    
+    tmp_t = torch.ones((1, nt)).to(target.device) @ target
+    ct = (target.t() @ target - (tmp_t.t() @ tmp_t) / nt) / (nt - 1)
+    
+    loss = (cs - ct).pow(2).sum() / (4 * d * d)
+    return loss
+
+def monotonicity_loss(y_pred, y_true):
+    """物理单调性正则化：强迫模型学习容量退化的单调递减趋势"""
+    if y_pred.size(0) < 2:
+        return torch.tensor(0.0).to(y_pred.device)
+        
+    # 按真实的 SOH 进行降序排序，恢复时间的先后顺序
+    _, indices = torch.sort(y_true.squeeze(), descending=True)
+    sorted_preds = y_pred.squeeze()[indices]
+    
+    # 计算相邻预测的差值：如果后一个循环的容量比前一个大，diff 将为正
+    diff = sorted_preds[1:] - sorted_preds[:-1]
+    
+    # ReLU 只保留违背物理规律的（正值）部分进行惩罚
+    loss_mono = torch.relu(diff).mean()
+    return loss_mono
 
 
 def evaluate_soh(model, loader, device):
@@ -54,7 +89,8 @@ def evaluate_soh(model, loader, device):
             data, label = data.to(device).float(), label.to(device).float()
             xc, xd = data[:, :4, :], data[:, 4:, :]
 
-            soh_pred, _ = model(xc, xd, alpha=0.0)
+            # soh_pred, _ = model(xc, xd, alpha=0.0)
+            soh_pred, _, _ = model(xc, xd, alpha=0.0)
             loss = criterion(soh_pred, label)
             meter.update(loss.item(), n=data.size(0))
 
@@ -175,9 +211,14 @@ def main():
             p = float(i + (epoch - 1) * len(src_train_loader)) / (args.n_epoch * len(src_train_loader))
             alpha = 2. / (1. + np.exp(-10 * p)) - 1
             
-            soh_pred_s, domain_pred_s = model(xc_s, xd_s, alpha=alpha)
+            # soh_pred_s, domain_pred_s = model(xc_s, xd_s, alpha=alpha)
+            # loss_soh = criterion(soh_pred_s, label_s)
+            # _, domain_pred_t = model(xc_t, xd_t, alpha=alpha)
+            soh_pred_s, domain_pred_s, fused_s = model(xc_s, xd_s, alpha=alpha)
             loss_soh = criterion(soh_pred_s, label_s)
-            _, domain_pred_t = model(xc_t, xd_t, alpha=alpha)
+            _, domain_pred_t, fused_t = model(xc_t, xd_t, alpha=alpha)
+            # 计算 CORAL 损失
+            loss_coral = coral_loss(fused_s, fused_t)
             
             if domain_pred_s is not None and domain_pred_t is not None:
                 domain_label_s = torch.zeros(data_s.size(0), dtype=torch.long).to(device)
@@ -185,7 +226,9 @@ def main():
                 
                 loss_domain_s = domain_criterion(domain_pred_s, domain_label_s)
                 loss_domain_t = domain_criterion(domain_pred_t, domain_label_t)
-                loss = loss_soh + args.domain_weight * (loss_domain_s + loss_domain_t)
+                
+                # 结合 DANN 的对抗 Loss 和 CORAL 的二阶对齐 Loss
+                loss = loss_soh + args.domain_weight * (loss_domain_s + loss_domain_t) + args.domain_weight * loss_coral
             else:
                 loss = loss_soh
             
@@ -213,8 +256,20 @@ def main():
 
     # --- Phase 2: Few-Shot Fine-Tuning ---
     print("\n--- Phase 2: Target Domain Fine-Tuning ---")
-    ft_optimizer = torch.optim.Adam(model.parameters(), lr=1e-4, weight_decay=args.weight_decay)
+
+    # 🌟 三板斧之 3：分层差分学习率
+    # 冻结底盘（1e-6）保住 Batch 3 的时序特征，激活顶层回归头（1e-4）快速拟合目标域
+    ft_optimizer = torch.optim.Adam([
+        {'params': model.lstm_charge.parameters(), 'lr': 1e-5},
+        {'params': model.attn_charge.parameters(), 'lr': 5e-5},
+        {'params': model.lstm_discharge.parameters(), 'lr': 1e-5},
+        {'params': model.attn_discharge.parameters(), 'lr': 5e-5},
+        {'params': model.bottleneck.parameters(), 'lr': 1e-4},      # 瓶颈层快速适应
+        {'params': model.regressor.parameters(), 'lr': 1e-4}       # 稍微拉高回归头的火力
+    ], weight_decay=1e-4)
+    
     ft_criterion = nn.MSELoss()
+    lambda_phy = 0.0001
     
     for epoch in range(1, args.ft_epoch + 1):
         model.train()
@@ -223,8 +278,15 @@ def main():
             data, label = data.to(device).float(), label.to(device).float()
             xc, xd = data[:, :4, :], data[:, 4:, :]
             
-            soh_pred, _ = model(xc, xd, alpha=0.0)
-            loss = ft_criterion(soh_pred, label)
+            # 同样适配 3 个返回值
+            soh_pred, _, _ = model(xc, xd, alpha=0.0)
+            
+            # 🌟 三板斧之 2：加入物理单调性 Loss
+            loss_mse = ft_criterion(soh_pred, label)
+            loss_phy = monotonicity_loss(soh_pred, label)
+            
+            # 结合 MSE 和 物理惩罚项
+            loss = loss_mse  + lambda_phy * loss_phy
             
             ft_optimizer.zero_grad()
             loss.backward()
@@ -233,7 +295,7 @@ def main():
             
         if epoch % 10 == 0:
             avg_ft_loss = total_ft_loss / len(ft_loader.dataset)
-            print(f"FT Epoch [{epoch:03d}/{args.ft_epoch}] Loss: {avg_ft_loss:.6f}")
+            print(f"FT Epoch [{epoch:03d}/{args.ft_epoch}] Loss (MSE+Phy): {avg_ft_loss:.6f}")
 
     # --- Phase 3: Evaluation ---
     print("\n--- Phase 3: Final Evaluation ---")
