@@ -92,8 +92,6 @@ def evaluate_soh(model, loader, device, is_batch_5=False):
             data, label = data.to(device).float(), label.to(device).float()
             xc, xd = data[:, :4, :], data[:, 4:, :]
 
-            # 注意：这里不再有 xd * 0.1 了，让模型看真实的特征！
-
             soh_pred, _, _ = model(xc, xd, alpha=0.0)
             loss = criterion(soh_pred, label)
             meter.update(loss.item(), n=data.size(0))
@@ -301,8 +299,9 @@ def main():
     ], weight_decay = ft_weight_decay)
     
     # ft_criterion = nn.MSELoss()
-    ft_criterion = nn.HuberLoss(delta=0.05)
-    lambda_phy = 0.0001
+
+    # ft_criterion = nn.HuberLoss(delta=0.05)
+    # lambda_phy = 0.0001
     
     for epoch in range(1, args.ft_epoch + 1):
         model.train()
