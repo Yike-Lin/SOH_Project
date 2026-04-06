@@ -141,7 +141,8 @@ class DualStreamBiLSTMAttentionUDA(nn.Module):
             feat_d_fused = feat_d
 
         # 拼接原始特征 (1024维)
-        raw_fused = torch.cat([feat_c, feat_d], dim=1) 
+        # If is_batch_5: apply the intended discharge-feature suppression.
+        raw_fused = torch.cat([feat_c, feat_d_fused], dim=1) 
         
         # 通过瓶颈层提纯特征 (压到 128维)
         bottleneck_feat = self.bottleneck(raw_fused)
