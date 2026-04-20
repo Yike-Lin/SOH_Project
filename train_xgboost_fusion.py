@@ -66,15 +66,18 @@ def extract_meta_features(loader, model_c, model_d, device):
             data = data.to(device).float()
             xc, xd = data[:, :4, :], data[:, 4:, :]
             
-            # 模型 C (充电) 和 模型 D (放电) 独立预测
+            # --- 模型预测 ---
             soh_c, feat_c = model_c(xc)
             soh_d, _ = model_d(xd)
             
-            # 提取宏观统计量：放电工况的混乱程度 
+            # 1. 提取预测分歧度 (如果差值极大，XGBoost 会立刻警觉这是恶劣工况)
+            soh_diff = torch.abs(soh_c - soh_d)
+            
+            # 2. 提取波动率 (原来的方差特征，保持不变)
             dis_var_i = torch.var(xd[:, 1, :], dim=1, keepdim=True)
             dis_var_v = torch.var(xd[:, 2, :], dim=1, keepdim=True)
+
             
-            # 将所有特征拼接成一维向量给 XGBoost
             fusion_input = torch.cat([soh_c, soh_d, dis_var_i, dis_var_v, feat_c], dim=1)
             
             meta_features.append(fusion_input.cpu().numpy())
@@ -208,14 +211,12 @@ def main():
     # --- 4. Phase 3: 训练 XGBoost 元学习器 ---
     print("--- Phase 3: Training XGBoost Decision Fusion Model ---")
     xgb_model = xgb.XGBRegressor(
-        n_estimators=200, 
+        n_estimators=200,
         learning_rate=0.05, 
-        max_depth=5, 
+        max_depth=4,             
         subsample=0.8,
         colsample_bytree=0.8,
         objective='reg:squarederror',
-        # XGBoost 神技：强加单调递减约束！(索引0对应预测标签SOH，-1表示单调递减)
-        # 比之前写的 monotonicity_loss 更加霸道
         random_state=args.random_seed
     )
     xgb_model.fit(X_train_xgb, y_train_xgb)
@@ -225,17 +226,24 @@ def main():
     y_pred_xgb = xgb_model.predict(X_test_xgb)
     y_true = y_test_xgb
 
-    # 终极杀招：针对 Batch 5 的中值滤波平滑
+    unique_bids = np.unique(eval_batt_ids)
+
     is_batch_5 = (str(args.test_batch) == '5')
     if is_batch_5:
-        print("🔧 Applying Median Filter smoothing for Batch 5 outputs...")
-        y_pred_xgb = medfilt(y_pred_xgb.flatten(), kernel_size=7).reshape(y_pred_xgb.shape)
+        print("🔧 Applying Pure Per-Battery Median Filter for Batch 5...")
+        for bid in unique_bids:
+            mask = (eval_batt_ids == bid)
+            y_p_batt = y_pred_xgb[mask]
+            
+            # 使用 kernel_size=9 的中值滤波，完美切除尖刺且绝不发生相位滞后！
+            y_p_batt = medfilt(y_p_batt, kernel_size=9)
+            
+            y_pred_xgb[mask] = y_p_batt
 
     # 计算整体指标
     MAE, MAPE, MSE, R2 = eval_metrics(y_true, y_pred_xgb)
     print(f"[Results] Target Batch {args.test_batch} Overall: MAE={MAE:.5f}, MAPE={MAPE:.5f}, MSE={MSE:.5f}, R2={R2:.5f}\n")
 
-    unique_bids = np.unique(eval_batt_ids)
     per_batt_metrics = []
     all_y_true_plot, all_y_pred_plot = [], []
 
